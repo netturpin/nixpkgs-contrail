@@ -3,6 +3,7 @@ import <nixpkgs/nixos/tests/make-test.nix> {
     { config, pkgs, ... }:
     let
       contrailPkgs = import ../controller.nix { inherit pkgs; };
+      contrailDeps = import ../deps.nix { inherit pkgs; };
 
       cassandraPkg = pkgs.cassandra_2_1.override {jre = pkgs.jre7;};
       cassandraConfigDir = pkgs.runCommand "cassandraConfDir" {} ''
@@ -83,7 +84,49 @@ import <nixpkgs/nixos/tests/make-test.nix> {
           policy=fixed
         '';
       };
-      
+      control = pkgs.writeTextFile {
+        name = "contrail-control.conf";
+        text = ''
+          [DEFAULT]
+          log_file = /var/log/contrail/control.log
+          log_local = 1
+          log_level = SYS_DEBUG
+
+          [IFMAP]
+          server_url= https://127.0.0.1:8443
+          password = api-server
+          user = api-server
+
+          [DISCOVERY]
+          port = 5998
+          server = 127.0.0.1
+        '';
+      };
+      collector = pkgs.writeTextFile {
+        name = "contrail-collector.conf";
+        text = ''
+          [DEFAULT]
+          log_local = 1
+          log_level = SYS_DEBUG
+          log_file=/var/log/contrail/contrail-collector.log
+          cassandra_server_list = 127.0.0.1:9042
+
+          [COLLECTOR]
+          port=8086
+          server=0.0.0.0
+
+          [DISCOVERY]
+          port = 5998
+          server = 127.0.0.1
+
+          [REDIS]
+          port=6379
+          server=127.0.0.1
+
+          [API_SERVER]
+          api_server_list = 127.0.0.1:8082
+        '';
+      };
     in
     { 
       services.openssh.enable = true;
@@ -92,11 +135,12 @@ import <nixpkgs/nixos/tests/make-test.nix> {
 
       services.rabbitmq.enable = true;
       services.zookeeper.enable = true;
+      services.redis.enable = true;
 
       virtualisation = { memorySize = 4096; cores = 2; };
 
       # Required by the test suite
-      environment.systemPackages = [ pkgs.jq ];
+      environment.systemPackages = [ pkgs.jq contrailPkgs.contrailConfigUtils contrailDeps.contrailApiCli ];
 
       systemd.services.contrailDiscovery = {
         wantedBy = [ "multi-user.target" ];
@@ -128,6 +172,20 @@ import <nixpkgs/nixos/tests/make-test.nix> {
           done
           sleep 2
         '';
+      };
+
+      systemd.services.contrailCollector = {
+        wantedBy = [ "multi-user.target" ];
+        after = [ "network.target" "cassandra.service" "rabbitmq.servive" "zookeeper.service" "redis.service" ];
+        preStart = "mkdir -p /var/log/contrail/";
+        script = "${contrailPkgs.contrailCollector}/bin/contrail-collector --conf_file ${collector}";
+      };
+
+      systemd.services.contrailControl = {
+        wantedBy = [ "multi-user.target" ];
+        after = [ "network.target" "contrailApi.service" "contrailCollector" ];
+        preStart = "mkdir -p /var/log/contrail/";
+        script = "${contrailPkgs.contrailControl}/bin/contrail-control --conf_file ${control}";
       };
 
       systemd.services.cassandra = {
